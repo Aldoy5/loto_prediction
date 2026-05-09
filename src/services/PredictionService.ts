@@ -20,6 +20,12 @@ const COLLECTION_NAME = "predictions";
 export const subscribeToUserPredictions = (userId: string, callback: (predictions: Prediction[]) => void) => {
   if (!userId) return () => {};
 
+  const quotaHit = window.localStorage.getItem('firestore_quota_hit') === 'true';
+  if (quotaHit) {
+    console.debug("[PredictionService] Quota hit detected. Subscription skipped.");
+    return () => {};
+  }
+
   const q = query(
     collection(db, COLLECTION_NAME),
     where("userId", "==", userId),
@@ -39,22 +45,37 @@ export const subscribeToUserPredictions = (userId: string, callback: (prediction
 };
 
 export const savePrediction = async (prediction: Omit<Prediction, "id" | "timestamp">) => {
+  const quotaHit = window.localStorage.getItem('firestore_quota_hit') === 'true';
+  if (quotaHit) {
+    console.warn("[Predictions] Quota reached. Cloud save skipped.");
+    return null;
+  }
+  
   try {
     const docRef = await addDoc(collection(db, COLLECTION_NAME), {
       ...prediction,
       timestamp: serverTimestamp()
     });
     return docRef.id;
-  } catch (error) {
+  } catch (error: any) {
+    if (error.code === 'resource-exhausted') {
+      window.localStorage.setItem('firestore_quota_hit', 'true');
+    }
     handleFirestoreError(error, OperationType.CREATE, COLLECTION_NAME);
   }
 };
 
 export const updatePredictionMatches = async (predictionId: string, matches: Prediction["matches"]) => {
+  const quotaHit = window.localStorage.getItem('firestore_quota_hit') === 'true';
+  if (quotaHit) return;
+
   try {
     const docRef = doc(db, COLLECTION_NAME, predictionId);
     await updateDoc(docRef, { matches });
-  } catch (error) {
+  } catch (error: any) {
+    if (error.code === 'resource-exhausted') {
+      window.localStorage.setItem('firestore_quota_hit', 'true');
+    }
     handleFirestoreError(error, OperationType.UPDATE, COLLECTION_NAME);
   }
 };

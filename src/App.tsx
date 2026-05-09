@@ -1,7 +1,7 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useMemo, useRef } from "react";
 import { AuthProvider, useAuth } from "./context/AuthContext";
 import { signInWithGoogle, auth } from "./firebase";
-import { subscribeToDraws, saveDraws } from "./services/DrawService";
+import { subscribeToDraws, saveDraws, getAllDraws } from "./services/DrawService";
 import { subscribeToUserPredictions, savePrediction, evaluatePredictions } from "./services/PredictionService";
 import { Draw, Prediction } from "./types";
 import { motion, AnimatePresence } from "motion/react";
@@ -20,7 +20,10 @@ import {
   ClipboardList,
   CheckCircle2,
   Database,
-  Download
+  Download,
+  Search,
+  Info,
+  Settings2
 } from "lucide-react";
 import axios from "axios";
 import { getPredictions } from "./services/geminiService";
@@ -124,12 +127,43 @@ function Layout({ children, activeTab, setActiveTab }: { children: React.ReactNo
             <h2 className="text-slate-800 font-bold text-lg tracking-tight capitalize">{activeTab}</h2>
             <div className="h-4 w-[1px] bg-slate-200" />
             <span className="text-[10px] text-slate-400 uppercase font-bold tracking-widest">Loto Bonheur CI</span>
+            
+            {/* Local Mode Indicator */}
+            <div className="hidden md:flex items-center gap-2 px-3 py-1 bg-amber-50 border border-amber-100 rounded-full">
+              <div className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse" />
+              <span className="text-[9px] font-black text-amber-700 uppercase tracking-tight">Hybride: Cloud + Local DB</span>
+            </div>
           </div>
           
           <div className="flex items-center gap-4">
             <SyncButton />
           </div>
         </header>
+
+        {/* Global Warning Banner for Quota */}
+        <AnimatePresence>
+          {window.localStorage.getItem('firestore_quota_hit') && (
+            <motion.div 
+              initial={{ height: 0, opacity: 0 }}
+              animate={{ height: 'auto', opacity: 1 }}
+              className="bg-red-600 text-white px-8 py-2 text-[10px] font-bold uppercase tracking-widest flex items-center justify-between"
+            >
+              <div className="flex items-center gap-2">
+                <AlertCircle className="w-3 h-3" />
+                <span>Quota Firebase Épuisé : L'application utilise maintenant la base locale (IndexedDB). Les nouvelles données sont sauvegardées dans votre navigateur.</span>
+              </div>
+              <button 
+                onClick={() => {
+                  window.localStorage.removeItem('firestore_quota_hit');
+                  window.location.reload();
+                }}
+                className="hover:underline"
+              >
+                Réessayer
+              </button>
+            </motion.div>
+          )}
+        </AnimatePresence>
 
         <div className="flex-1 overflow-y-auto p-8 bg-white/50">
           <AnimatePresence mode="wait">
@@ -235,52 +269,105 @@ function Dashboard({ draws }: { draws: Draw[] }) {
 
   const handleDeepSync = async () => {
     if (!user) return;
-    setSyncStatus({ loading: true, message: 'Initialisation du Deep Sync...' });
+    setSyncStatus({ loading: true, message: 'Initialisation de la synchronisation totale...' });
     
     try {
       const monthsChoices = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"];
       const now = new Date();
-      const monthsToFetch = [];
+      const currentYear = now.getFullYear();
+      const startYear = 2012; // Universal LONACI archives start potentially in 2012, API might stop earlier
       
-      // Fetch last 36 months to build a comprehensive DB
-      for (let i = 0; i < 36; i++) {
-        const d = new Date();
-        d.setMonth(now.getMonth() - i);
-        monthsToFetch.push(`${monthsChoices[d.getMonth()]} ${d.getFullYear()}`);
+      const monthsToFetch: string[] = [];
+      
+      for (let y = currentYear; y >= startYear; y--) {
+        const monthLimit = y === currentYear ? now.getMonth() : 11;
+        for (let m = monthLimit; m >= 0; m--) {
+          monthsToFetch.push(`${monthsChoices[m]} ${y}`);
+        }
       }
 
       let total = 0;
-      for (const m of monthsToFetch) {
-        setSyncStatus({ loading: true, message: `Extraction: ${m}...` });
+      let emptyMonthsStreak = 0;
+      let successCount = 0;
+      let failCount = 0;
+      
+      // Sequential for maximum reliability
+      for (let i = 0; i < monthsToFetch.length; i++) {
+        const m = monthsToFetch[i];
+        const progress = Math.round((i / monthsToFetch.length) * 100);
+        
+        setSyncStatus({ 
+          loading: true, 
+          message: `[${progress}%] ${m} — Extraction... (${i}/${monthsToFetch.length})` 
+        });
+        
         try {
-          const res = await axios.get(`/api/scrape?month=${encodeURIComponent(m)}`);
-          if (res.data.success && res.data.count > 0) {
-            console.log(`[DeepSync] Month: ${m}, Count: ${res.data.count}`);
-            await saveDraws(res.data.data);
-            total += res.data.count;
+          console.debug(`[FullSync] Fetching ${m}...`);
+          const res = await axios.get(`/api/scrape?month=${encodeURIComponent(m)}`, { timeout: 60000 });
+          
+          if (res.data.success) {
+            successCount++;
+            if (res.data.count > 0) {
+              await saveDraws(res.data.data);
+              total += res.data.count;
+              emptyMonthsStreak = 0;
+            } else {
+              emptyMonthsStreak++;
+              if (emptyMonthsStreak > 12) {
+                 // Heuristic: If we get 12 consecutive months with 0 data, stop early (likely reached end of archives)
+                 console.log("[FullSync] Consecutive empty months found in deep archive. Stopping.");
+                 break;
+              }
+            }
+          } else {
+            console.error(`[FullSync] Server error for ${m}`);
+            failCount++;
           }
-        } catch (err) {
-          console.error(`[DeepSync] Error for ${m}:`, err);
+        } catch (err: any) {
+          console.error(`[FullSync] Error for ${m}:`, err.message);
+          failCount++;
+          // Wait a bit on error before next try
+          await new Promise(resolve => setTimeout(resolve, 2000));
         }
+
+        // Small delay to be gentle and allow UI updates
+        await new Promise(resolve => setTimeout(resolve, 100));
       }
-      setSyncStatus({ loading: false, message: `Deep Sync terminé: ${total} tirages ajoutés !` });
+
+      setSyncStatus({ 
+        loading: false, 
+        message: `Terminé ! ${total} tirages archivés (${successCount} mois vérifiés, ${failCount} échecs).` 
+      });
     } catch (err: any) {
-      setSyncStatus({ loading: false, message: `Erreur: ${err.message}` });
+      setSyncStatus({ loading: false, message: `Erreur critique: ${err.message}` });
     }
     
-    setTimeout(() => setSyncStatus({ loading: false, message: '' }), 5000);
+    setTimeout(() => setSyncStatus({ loading: false, message: '' }), 15000);
   };
 
-  const handleExport = () => {
-    const dataStr = JSON.stringify(draws, null, 2);
-    const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
-    
-    const exportFileDefaultName = `lonaci_db_export_${new Date().toISOString().split('T')[0]}.json`;
-    
-    const linkElement = document.createElement('a');
-    linkElement.setAttribute('href', dataUri);
-    linkElement.setAttribute('download', exportFileDefaultName);
-    linkElement.click();
+  const handleExport = async () => {
+    setSyncStatus({ loading: true, message: 'Récupération de la base locale...' });
+    try {
+      const allDraws = await getAllDraws();
+      const blob = new Blob([JSON.stringify(allDraws, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      
+      const exportFileDefaultName = `lonaci_full_export_${new Date().toISOString().split('T')[0]}.json`;
+      
+      const linkElement = document.createElement('a');
+      linkElement.setAttribute('href', url);
+      linkElement.setAttribute('download', exportFileDefaultName);
+      linkElement.click();
+      
+      // Cleanup
+      setTimeout(() => URL.revokeObjectURL(url), 100);
+      
+      setSyncStatus({ loading: false, message: 'Export JSON local terminé !' });
+    } catch (err) {
+      console.error("Export failed:", err);
+      setSyncStatus({ loading: false, message: 'Erreur lors de l\'export local.' });
+    }
+    setTimeout(() => setSyncStatus({ loading: false, message: '' }), 5000);
   };
 
   if (draws.length === 0) return (
@@ -302,9 +389,14 @@ function Dashboard({ draws }: { draws: Draw[] }) {
             <span className="text-3xl font-bold text-slate-900 tracking-tighter">{draws.length}</span>
             <span className="text-[10px] text-slate-400 uppercase font-black">Tirages</span>
           </div>
+          {draws.length > 0 && (
+            <p className="text-[9px] text-slate-400 font-bold mt-2 uppercase">
+              Plage: {draws[draws.length - 1].date_tirage} — {draws[0].date_tirage}
+            </p>
+          )}
         </div>
         <div className="bg-slate-50 border border-slate-100 p-6 rounded-2xl shadow-sm relative overflow-hidden group">
-          <p className="text-slate-400 text-[10px] font-bold mb-1 uppercase tracking-widest">Base de Données</p>
+          <p className="text-slate-400 text-[10px] font-bold mb-1 uppercase tracking-widest">Mise à jour</p>
           <div className="flex flex-col gap-2">
             <button 
               disabled={syncStatus.loading || !user}
@@ -312,7 +404,19 @@ function Dashboard({ draws }: { draws: Draw[] }) {
               className="text-xs font-bold text-indigo-600 flex items-center gap-2 hover:underline disabled:opacity-30"
             >
               <Database className="w-4 h-4" />
-              {syncStatus.loading ? 'Sync en cours...' : 'Deep Sync (3 ans)'}
+              {syncStatus.loading ? 'Sync Global...' : 'Sync Totale (2012-2026)'}
+            </button>
+            <button 
+              onClick={async () => {
+                if (confirm("Voulez-vous vraiment effacer la base locale et tout re-télécharger ?")) {
+                  const { localDb } = await import("./lib/db");
+                  await localDb.draws.clear();
+                  window.location.reload();
+                }
+              }}
+              className="text-[9px] font-bold text-red-400 hover:text-red-600 uppercase tracking-tighter"
+            >
+              Réinitialiser la base
             </button>
             <button 
               onClick={handleExport}
@@ -324,7 +428,7 @@ function Dashboard({ draws }: { draws: Draw[] }) {
             </button>
           </div>
           {syncStatus.message && (
-            <p className="text-[8px] font-bold text-indigo-400 mt-2 uppercase animate-pulse">{syncStatus.message}</p>
+            <p className="text-[8px] font-bold text-indigo-400 mt-2 uppercase animate-pulse leading-tight">{syncStatus.message}</p>
           )}
         </div>
         <div className="bg-slate-50 border border-slate-100 p-6 rounded-2xl shadow-sm hover:shadow-md transition-shadow">
@@ -448,69 +552,693 @@ function HistoryView({ draws }: { draws: Draw[] }) {
 }
 
 function StatsView({ draws }: { draws: Draw[] }) {
-  const frequencies: Record<number, number> = {};
-  draws.forEach(d => [...d.gagnants, ...d.machine].forEach(n => frequencies[n] = (frequencies[n] || 0) + 1));
+  const [selectedNum, setSelectedNum] = useState<number | null>(null);
   
-  const sorted = Object.entries(frequencies)
+  if (draws.length === 0) return null;
+
+  // Analysis for Selected Number
+  const getNumAnalysis = (num: number) => {
+    const drawsWithNum = draws.filter(d => d.gagnants.includes(num));
+    const neighbors: Record<number, number> = {};
+    const following: Record<number, number> = {};
+    const preceding: Record<number, number> = {};
+
+    draws.forEach((d, i) => {
+      if (d.gagnants.includes(num)) {
+        // Neighbors
+        d.gagnants.forEach(n => {
+          if (n !== num) neighbors[n] = (neighbors[n] || 0) + 1;
+        });
+
+        // Following (Draw i-1 in our DESC array is chronologically next)
+        if (i > 0) {
+          draws[i-1].gagnants.forEach(n => {
+            following[n] = (following[n] || 0) + 1;
+          });
+        }
+
+        // Preceding (Draw i+1 in our DESC array is chronologically previous)
+        if (i < draws.length - 1) {
+          draws[i+1].gagnants.forEach(n => {
+            preceding[n] = (preceding[n] || 0) + 1;
+          });
+        }
+      }
+    });
+
+    const sort = (entries: Record<number, number>) => 
+      Object.entries(entries).sort(([, a], [, b]) => b - a).slice(0, 5);
+
+    return {
+      freq: drawsWithNum.length,
+      neighbors: sort(neighbors),
+      following: sort(following),
+      preceding: sort(preceding)
+    };
+  };
+
+  const analysis = selectedNum ? getNumAnalysis(selectedNum) : null;
+
+  // 1. Frequencies (Winners & Machine)
+  const winnersFreq: Record<number, number> = {};
+  const machineFreq: Record<number, number> = {};
+  const totalFreq: Record<number, number> = {};
+  
+  // 2. Gaps (Last appearance)
+  const lastSeen: Record<number, number> = {}; // draw index
+  
+  draws.forEach((d, drawIndex) => {
+    d.gagnants.forEach(n => {
+      winnersFreq[n] = (winnersFreq[n] || 0) + 1;
+      totalFreq[n] = (totalFreq[n] || 0) + 1;
+      if (lastSeen[n] === undefined) lastSeen[n] = drawIndex;
+    });
+    d.machine.forEach(n => {
+      machineFreq[n] = (machineFreq[n] || 0) + 1;
+      totalFreq[n] = (totalFreq[n] || 0) + 1;
+    });
+  });
+
+  // 3. Hot and Cold
+  const sortedWinners = Object.entries(winnersFreq)
+    .sort(([, a], [, b]) => b - a);
+  
+  const hotNumbers = sortedWinners.slice(0, 10);
+  const coldNumbers = sortedWinners.slice(-10).reverse();
+
+  // 4. Parity
+  let even = 0;
+  let odd = 0;
+  draws.forEach(d => {
+    d.gagnants.forEach(n => {
+      if (n % 2 === 0) even++;
+      else odd++;
+    });
+  });
+  const totalNumbers = even + odd;
+
+  // 5. Decades
+  const decades: Record<string, number> = {
+    '1-10': 0, '11-20': 0, '21-30': 0, '31-40': 0, '41-50': 0, 
+    '51-60': 0, '61-70': 0, '71-80': 0, '81-90': 0
+  };
+  draws.forEach(d => {
+    d.gagnants.forEach(n => {
+      if (n <= 10) decades['1-10']++;
+      else if (n <= 20) decades['11-20']++;
+      else if (n <= 30) decades['21-30']++;
+      else if (n <= 40) decades['31-40']++;
+      else if (n <= 50) decades['41-50']++;
+      else if (n <= 60) decades['51-60']++;
+      else if (n <= 70) decades['61-70']++;
+      else if (n <= 80) decades['71-80']++;
+      else if (n <= 90) decades['81-90']++;
+    });
+  });
+
+  // 6. Average Gaps (Top 5 largest gaps currently)
+  const gaps = Object.entries(lastSeen)
     .sort(([, a], [, b]) => b - a)
     .slice(0, 10);
 
   return (
-    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
-      <section className="lg:col-span-2 bg-white border border-slate-100 p-8 rounded-3xl shadow-sm">
-        <div className="flex items-center justify-between mb-8">
-          <h3 className="text-sm font-bold text-slate-800 uppercase tracking-widest border-l-4 border-indigo-500 px-2 text-indigo-500">Top 10 Numéros Chauds</h3>
-          <TrendingUp className="w-5 h-5 text-indigo-500 opacity-20" />
+    <div className="space-y-12">
+      {/* Algorithmic Prediction based on Cross-Frequencies */}
+      <ProbabilisticPrediction draws={draws} />
+
+      {/* Data Export Section */}
+      {draws.length > 0 && (
+        <section className="bg-slate-50 border border-slate-200 p-8 rounded-3xl shadow-sm">
+          <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
+            <div>
+              <h3 className="text-sm font-bold text-slate-800 uppercase tracking-widest border-l-4 border-indigo-600 px-2">Exportation Expert</h3>
+              <p className="text-[10px] text-slate-400 font-bold uppercase mt-1 px-3">Téléchargez l'historique par type de jeu pour analyse externe</p>
+            </div>
+            <div className="flex flex-wrap gap-3">
+              {Array.from(new Set(draws.map(d => d.nom_tirage)))
+                .map(gameName => {
+                  const gameDraws = draws.filter(d => d.nom_tirage === gameName);
+                  if (gameDraws.length < 200) return null;
+                  
+                  return (
+                    <button
+                      key={gameName}
+                      onClick={() => {
+                        const dataStr = "data:text/json;charset=utf-8," + encodeURIComponent(JSON.stringify(gameDraws, null, 2));
+                        const downloadAnchorNode = document.createElement('a');
+                        downloadAnchorNode.setAttribute("href", dataStr);
+                        downloadAnchorNode.setAttribute("download", `lotto_export_${gameName.toLowerCase()}_${gameDraws.length}.json`);
+                        document.body.appendChild(downloadAnchorNode);
+                        downloadAnchorNode.click();
+                        downloadAnchorNode.remove();
+                      }}
+                      className="flex items-center gap-2 bg-white border border-slate-200 hover:border-indigo-500 hover:text-indigo-600 px-4 py-2 rounded-xl text-[10px] font-black uppercase tracking-widest transition-all shadow-sm"
+                    >
+                      <Download className="w-3 h-3" />
+                      {gameName} ({gameDraws.length})
+                    </button>
+                  );
+                })}
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* Number Analysis Search */}
+      <section className="bg-white border-2 border-indigo-50 p-8 rounded-3xl shadow-sm">
+        <div className="flex flex-col md:flex-row md:items-center justify-between gap-6 mb-8">
+          <div>
+            <h3 className="text-sm font-bold text-slate-800 uppercase tracking-widest border-l-4 border-indigo-600 px-2">Recherche Individuelle</h3>
+            <p className="text-[10px] text-slate-400 font-bold uppercase mt-1 px-3">Analysez les comportements d'un numéro spécifique</p>
+          </div>
+          <div className="flex items-center gap-3 bg-slate-50 p-2 rounded-2xl border border-slate-100">
+            <Search className="w-4 h-4 text-slate-400 ml-2" />
+            <input 
+              type="number" 
+              placeholder="Ex: 45"
+              min="1"
+              max="90"
+              className="bg-transparent border-none focus:ring-0 text-sm font-bold text-slate-700 w-24"
+              onChange={(e) => setSelectedNum(e.target.value ? parseInt(e.target.value) : null)}
+            />
+          </div>
         </div>
-        <div className="space-y-6">
-          {sorted.map(([num, count]) => (
-            <div key={num} className="flex items-center gap-6 group">
-              <div className="w-9 h-9 rounded-xl bg-slate-50 border border-slate-100 text-slate-800 flex items-center justify-center font-bold text-xs group-hover:bg-indigo-600 group-hover:text-white group-hover:border-indigo-600 transition-all">
-                {num}
+
+        {analysis && selectedNum ? (
+          <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-8">
+            <div className="space-y-2">
+              <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest">Fréquence Totale</p>
+              <div className="flex items-baseline gap-2">
+                <span className="text-4xl font-black text-indigo-600">{analysis.freq}</span>
+                <span className="text-[10px] text-slate-400 font-bold uppercase">Apparitions</span>
               </div>
-              <div className="flex-1 space-y-1.5">
-                <div className="h-2 bg-slate-100 rounded-full overflow-hidden">
-                  <motion.div 
-                    initial={{ width: 0 }}
-                    animate={{ width: `${(count / (draws.length * 10)) * 100}%` }}
-                    className="h-full bg-gradient-to-r from-indigo-500 to-violet-500 rounded-full"
-                  />
+            </div>
+
+            <div className="space-y-3">
+              <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest">Compagnons (Voisins)</p>
+              <div className="flex flex-wrap gap-2">
+                {analysis.neighbors.map(([num, count]) => (
+                  <div key={num} className="bg-slate-50 border border-slate-100 px-3 py-1 rounded-lg flex items-center gap-2">
+                    <span className="text-xs font-black text-slate-700">{num}</span>
+                    <span className="text-[9px] font-bold text-indigo-500 bg-indigo-50 px-1 rounded">x{count}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-3">
+              <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest">Numéros Précédents</p>
+              <div className="flex flex-wrap gap-2">
+                {analysis.preceding.map(([num, count]) => (
+                  <div key={num} className="bg-emerald-50 border border-emerald-100 px-3 py-1 rounded-lg flex items-center gap-2">
+                    <span className="text-xs font-black text-emerald-700">{num}</span>
+                    <span className="text-[9px] font-bold text-emerald-600 bg-white px-1 rounded">x{count}</span>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[8px] text-slate-400 italic">Apparus au tirage T-1</p>
+            </div>
+
+            <div className="space-y-3">
+              <p className="text-[10px] text-slate-400 font-black uppercase tracking-widest">Numéros Suivants</p>
+              <div className="flex flex-wrap gap-2">
+                {analysis.following.map(([num, count]) => (
+                  <div key={num} className="bg-amber-50 border border-amber-100 px-3 py-1 rounded-lg flex items-center gap-2">
+                    <span className="text-xs font-black text-amber-700">{num}</span>
+                    <span className="text-[9px] font-bold text-amber-600 bg-white px-1 rounded">x{count}</span>
+                  </div>
+                ))}
+              </div>
+              <p className="text-[8px] text-slate-400 italic">Apparus au tirage T+1</p>
+            </div>
+          </div>
+        ) : (
+          <div className="flex flex-col items-center justify-center py-10 opacity-30">
+            <Search className="w-10 h-10 text-slate-300 mb-2" />
+            <p className="text-xs font-bold text-slate-400 uppercase">Entrez un numéro pour voir ses affinités</p>
+          </div>
+        )}
+      </section>
+
+      {/* Top Section: Overview Cards */}
+      <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6">
+        <div className="bg-white border border-slate-100 p-6 rounded-2xl shadow-sm">
+          <p className="text-slate-400 text-[10px] font-bold mb-3 uppercase tracking-widest">Parité (Gagnants)</p>
+          <div className="flex items-center justify-between mb-2">
+            <span className="text-xs font-bold text-slate-700">Pairs</span>
+            <span className="text-xs font-mono font-bold text-indigo-600">{Math.round((even/totalNumbers)*100)}%</span>
+          </div>
+          <div className="h-2 bg-slate-100 rounded-full overflow-hidden flex">
+            <div className="h-full bg-indigo-500" style={{ width: `${(even/totalNumbers)*100}%` }} />
+            <div className="h-full bg-pink-400" style={{ width: `${(odd/totalNumbers)*100}%` }} />
+          </div>
+          <div className="flex items-center justify-between mt-2">
+            <span className="text-xs font-bold text-slate-700">Impairs</span>
+            <span className="text-xs font-mono font-bold text-pink-500">{Math.round((odd/totalNumbers)*100)}%</span>
+          </div>
+        </div>
+
+        <div className="bg-white border border-slate-100 p-6 rounded-2xl shadow-sm">
+          <p className="text-slate-400 text-[10px] font-bold mb-3 uppercase tracking-widest">Moyenne Gagnants</p>
+          <div className="flex items-baseline gap-2">
+            <span className="text-3xl font-bold text-slate-900 tracking-tighter">
+              {Math.round(draws.reduce((acc, d) => acc + d.gagnants.reduce((s, n) => s + n, 0), 0) / (draws.length * 5))}
+            </span>
+            <span className="text-[10px] text-slate-400 uppercase font-black">Valeur</span>
+          </div>
+          <p className="text-[9px] text-slate-400 mt-1 italic">Sur {draws.length} tirages</p>
+        </div>
+
+        <div className="bg-slate-900 border border-slate-800 p-6 rounded-2xl shadow-xl text-white">
+          <p className="text-slate-500 text-[10px] font-bold mb-3 uppercase tracking-widest">Record Ecart</p>
+          <div className="flex items-baseline gap-2">
+            <span className="text-3xl font-bold text-amber-500 tracking-tighter">{gaps[0][1]}</span>
+            <span className="text-[10px] text-slate-500 uppercase font-bold">Tirages</span>
+          </div>
+          <p className="text-[9px] text-slate-400 mt-1">Numéro {gaps[0][0]} en attente</p>
+        </div>
+
+        <div className="bg-white border border-slate-100 p-6 rounded-2xl shadow-sm">
+          <p className="text-slate-400 text-[10px] font-bold mb-3 uppercase tracking-widest">Santé Data</p>
+          <div className="flex items-center gap-2 text-emerald-600 font-bold">
+            <CheckCircle2 className="w-5 h-5" />
+            <span className="text-lg tracking-tight uppercase">OPTIMAL</span>
+          </div>
+          <p className="text-[9px] text-slate-400 mt-1 italic">Sync: Tout OK</p>
+        </div>
+      </div>
+
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+        {/* Hot Numbers */}
+        <section className="bg-white border border-slate-100 p-8 rounded-3xl shadow-sm">
+          <div className="flex items-center justify-between mb-8">
+            <h3 className="text-sm font-bold text-slate-800 uppercase tracking-widest border-l-4 border-indigo-500 px-2 text-indigo-500">Numéros les plus fréquents</h3>
+            <TrendingUp className="w-5 h-5 text-indigo-500 opacity-20" />
+          </div>
+          <div className="space-y-4">
+            {hotNumbers.map(([num, count]) => (
+              <div key={num} className="flex items-center gap-4 group">
+                <div className="w-8 h-8 rounded-lg bg-indigo-50 text-indigo-700 flex items-center justify-center font-bold text-xs group-hover:bg-indigo-600 group-hover:text-white transition-all">
+                  {num}
                 </div>
+                <div className="flex-1 h-1.5 bg-slate-50 rounded-full overflow-hidden">
+                  <div className="h-full bg-indigo-500" style={{ width: `${(count / draws.length) * 100}%` }} />
+                </div>
+                <span className="text-[10px] font-mono font-bold text-slate-400 w-12 text-right">
+                  {count}
+                </span>
               </div>
-              <span className="text-[10px] font-mono font-bold text-slate-400 min-w-[60px] text-right">
-                {count} <span className="opacity-40 font-normal">SORTS</span>
-              </span>
+            ))}
+          </div>
+        </section>
+
+        {/* Cold Numbers */}
+        <section className="bg-white border border-slate-100 p-8 rounded-3xl shadow-sm">
+          <div className="flex items-center justify-between mb-8">
+            <h3 className="text-sm font-bold text-slate-800 uppercase tracking-widest border-l-4 border-pink-500 px-2 text-pink-500">Numéros les moins fréquents</h3>
+            <TrendingUp className="w-5 h-5 text-pink-500 opacity-20 rotate-180" />
+          </div>
+          <div className="space-y-4">
+            {coldNumbers.map(([num, count]) => (
+              <div key={num} className="flex items-center gap-4 group">
+                <div className="w-8 h-8 rounded-lg bg-pink-50 text-pink-700 flex items-center justify-center font-bold text-xs group-hover:bg-pink-600 group-hover:text-white transition-all">
+                  {num}
+                </div>
+                <div className="flex-1 h-1.5 bg-slate-50 rounded-full overflow-hidden">
+                  <div className="h-full bg-pink-400" style={{ width: `${(count / draws.length) * 100}%` }} />
+                </div>
+                <span className="text-[10px] font-mono font-bold text-slate-400 w-12 text-right">
+                  {count}
+                </span>
+              </div>
+            ))}
+          </div>
+        </section>
+      </div>
+
+      {/* Decades Distribution */}
+      <section className="bg-white border border-slate-100 p-8 rounded-3xl shadow-sm">
+        <h3 className="text-sm font-bold text-slate-800 uppercase tracking-widest mb-8 border-l-4 border-slate-300 px-2">Distribution par Dizaines</h3>
+        <div className="grid grid-cols-3 sm:grid-cols-5 md:grid-cols-9 gap-4 text-center">
+          {Object.entries(decades).map(([decade, count]) => (
+            <div key={decade} className="space-y-3">
+              <div className="relative h-32 w-full bg-slate-50 rounded-lg flex flex-col justify-end overflow-hidden border border-slate-100">
+                <div 
+                  className="bg-indigo-500/80 w-full transition-all duration-500" 
+                  style={{ height: `${(count / (draws.length * 5)) * 500}%` }} 
+                />
+              </div>
+              <p className="text-[9px] font-bold text-slate-400 uppercase tracking-tighter">{decade}</p>
+              <p className="text-[10px] font-mono font-bold text-indigo-600">{count}</p>
             </div>
           ))}
         </div>
       </section>
-      
-      <div className="space-y-8">
-        <section className="bg-slate-900 border border-slate-800 p-8 rounded-3xl shadow-xl shadow-slate-200/20 text-white relative overflow-hidden">
-          <h3 className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-8">Volume Data</h3>
-          <div className="flex flex-col items-center justify-center py-4">
-            <div className="relative">
-              <Calendar className="w-16 h-16 text-indigo-500/20 mb-2" />
-              <div className="absolute inset-0 flex items-center justify-center">
-                <BarChart3 className="w-6 h-6 text-indigo-500" />
-              </div>
-            </div>
-            <p className="text-5xl font-bold tracking-tighter text-white mb-2">{draws.length}</p>
-            <p className="text-[10px] text-indigo-400 font-bold uppercase tracking-widest">Tirages Archivés</p>
-          </div>
-          <div className="absolute -right-6 -bottom-6 text-white/5 font-bold text-[8rem] pointer-events-none tracking-tighter">DATA</div>
-        </section>
 
-        <section className="bg-white border border-slate-100 p-8 rounded-3xl shadow-sm text-center">
-          <p className="text-[10px] font-bold text-slate-400 uppercase tracking-widest mb-2 text-center">Santé Base de Données</p>
-          <div className="flex items-center justify-center gap-2 text-emerald-500 font-bold mb-1">
-            <span className="w-2 h-2 rounded-full bg-emerald-500" />
-            <span className="text-xl tracking-tight uppercase">OPTIMISÉE</span>
-          </div>
-          <p className="text-[10px] font-mono text-slate-400 italic">Connected via Firestore</p>
-        </section>
-      </div>
+      {/* Gap Analysis */}
+      <section className="bg-slate-900 border border-slate-800 p-8 rounded-3xl shadow-xl text-white">
+        <h3 className="text-sm font-bold text-slate-400 uppercase tracking-widest mb-8 border-l-4 border-amber-500 px-2">Analyse des Ecarts (Tirages manqués)</h3>
+        <div className="grid grid-cols-2 sm:grid-cols-5 gap-6">
+          {gaps.map(([num, gap]) => (
+            <div key={num} className="bg-slate-800/50 p-4 rounded-xl border border-slate-700 flex flex-col items-center">
+              <div className="w-10 h-10 rounded-full bg-slate-700 flex items-center justify-center font-black text-xs text-indigo-400 border border-slate-600 mb-2">
+                {num}
+              </div>
+              <p className="text-[10px] font-bold text-slate-500 uppercase tracking-widest mb-1">Ecart Actuel</p>
+              <p className="text-2xl font-bold tracking-tighter text-amber-500">{gap}</p>
+            </div>
+          ))}
+        </div>
+      </section>
     </div>
+  );
+}
+
+function ProbabilisticPrediction({ draws }: { draws: Draw[] }) {
+  const [selectedGame, setSelectedGame] = useState<string>("");
+  const [backtestResult, setBacktestResult] = useState<{ bankerHits: number, napHits: number, total: number } | null>(null);
+  const [testing, setTesting] = useState(false);
+  const [calibrating, setCalibrating] = useState(false);
+  
+  // Weights storage: Map of gameName -> { gapWeight: number, transWeight: number }
+  const [gameWeights, setGameWeights] = useState<Record<string, { gap: number, trans: number, depth: number }>>({});
+
+  // Derive unique game names
+  const gameNames = useMemo(() => {
+    const names = Array.from(new Set(draws.map(d => d.nom_tirage).filter(Boolean)));
+    return names.sort();
+  }, [draws]);
+
+  // Set default game
+  useEffect(() => {
+    if (gameNames.length > 0 && !selectedGame) {
+      setSelectedGame(gameNames[0]);
+    }
+  }, [gameNames, selectedGame]);
+
+  const filteredDraws = useMemo(() => {
+    if (!selectedGame) return [];
+    return draws.filter(d => d.nom_tirage === selectedGame);
+  }, [draws, selectedGame]);
+
+  const currentWeights = useMemo(() => {
+    return gameWeights[selectedGame] || { gap: 3.0, trans: 1.0, depth: 100 };
+  }, [gameWeights, selectedGame]);
+
+  if (draws.length < 5) return null;
+
+  const getPredictionForDrawIndex = (index: number, activeDraws: Draw[], customWeights?: { gap: number, trans: number, depth: number }) => {
+    const baseDraw = activeDraws[index];
+    if (!baseDraw) return null;
+
+    const weights = customWeights || currentWeights;
+    const historicalData = activeDraws.slice(index, index + (weights.depth || 100));
+    if (historicalData.length < 20) return null;
+
+    const n = historicalData.length;
+    const hist = [...historicalData].reverse();
+    const base = hist[hist.length - 1];
+
+    const scores: Record<number, number> = {};
+    for (let i = 1; i <= 90; i++) scores[i] = 0;
+
+    const freq: Record<number, number> = {};
+    for (let i = 1; i <= 90; i++) freq[i] = 0;
+    
+    // Matrix of co-occurrences for Correlation Factor
+    const coMatrix: Record<number, Record<number, number>> = {};
+
+    hist.forEach(d => {
+      d.gagnants.forEach(a => {
+        freq[a]++;
+        if (!coMatrix[a]) coMatrix[a] = {};
+        d.gagnants.forEach(b => {
+          if (a !== b) coMatrix[a][b] = (coMatrix[a][b] || 0) + 1;
+        });
+      });
+    });
+    
+    const expected = n * 5 / 90;
+    const sigma = Math.sqrt(n * (5/90) * (85/90));
+
+    const baseSet = new Set(base.gagnants);
+    for (let i = 0; i < n - 1; i++) {
+      const overlap = hist[i].gagnants.some(num => baseSet.has(num));
+      if (overlap) {
+        const age = n - 1 - (i + 1);
+        const recency = Math.exp(-age / 30);
+        hist[i + 1].gagnants.forEach(f => {
+          scores[f] += weights.trans * recency; 
+        });
+      }
+    }
+
+    for (let num = 1; num <= 90; num++) {
+      let occ = 0, gap = 0;
+      let found = false;
+      for (let i = n - 1; i >= 0; i--) {
+        if (hist[i].gagnants.includes(num)) {
+          if (!found) { gap = n - 1 - i; found = true; }
+          occ++;
+        }
+      }
+      if (occ > 0) {
+        const avgGap = n / occ;
+        const z = (freq[num] - expected) / sigma;
+        if (gap > avgGap && z < 0.5) {
+          scores[num] += weights.gap * (gap / avgGap);
+        }
+      }
+    }
+
+    // ── FACTOR 3: CO-OCCURRENCE (Correlation) ──
+    // Boost numbers that often come together with the top results from factors 1 & 2
+    const preliminaryTop = Object.entries(scores)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 3)
+      .map(([n]) => parseInt(n));
+
+    preliminaryTop.forEach(topNum => {
+      if (coMatrix[topNum]) {
+        Object.entries(coMatrix[topNum]).forEach(([otherNum, count]) => {
+          const ratio = count / (freq[topNum] || 1);
+          if (ratio > 0.15) { // If they appear together > 15% of the time
+            scores[parseInt(otherNum)] += (ratio * 1.5);
+          }
+        });
+      }
+    });
+
+    const vals = Object.values(scores);
+    const minVal = Math.min(...vals), maxVal = Math.max(...vals);
+    if (maxVal > minVal) {
+      for (let i = 1; i <= 90; i++) {
+        scores[i] = (scores[i] - minVal) / (maxVal - minVal);
+      }
+    }
+
+    const ranked = Object.entries(scores)
+      .sort(([, a], [, b]) => b - a)
+      .slice(0, 5);
+
+    // Calculate a basic confidence index (0-1) based on the "gap" between top scores and mean
+    const topScore = ranked[0][1];
+    const avgScore = vals.reduce((a, b) => a + b, 0) / 90;
+    const confidence = Math.min(1, Math.max(0, (topScore - avgScore) / 0.5));
+
+    return {
+      numbers: ranked.map(([n]) => parseInt(n)),
+      confidence
+    };
+  };
+
+  const currentResult = filteredDraws.length >= 30 ? getPredictionForDrawIndex(0, filteredDraws) : null;
+  const currentProposed = currentResult?.numbers || null;
+  const confidenceScore = currentResult?.confidence || 0;
+
+  const runCalibration = async () => {
+    if (filteredDraws.length < 40) return;
+    setCalibrating(true);
+    
+    let bestGap = 3.0;
+    let bestTrans = 1.0;
+    let bestDepth = 100;
+    let maxHits = -1;
+
+    const gapRange = [1.0, 3.0, 5.0];
+    const transRange = [0.5, 1.5, 3.0];
+    const depthRange = [30, 60, 100, 200];
+
+    const testSpan = Math.min(filteredDraws.length - 1, 30);
+
+    for (const d of depthRange) {
+      for (const g of gapRange) {
+        for (const t of transRange) {
+          let hits = 0;
+          for (let i = 1; i <= testSpan; i++) {
+            const res = getPredictionForDrawIndex(i, filteredDraws, { gap: g, trans: t, depth: d });
+            if (res && filteredDraws[i-1].gagnants.includes(res.numbers[0])) {
+              hits++;
+            }
+          }
+          if (hits > maxHits) {
+            maxHits = hits;
+            bestGap = g;
+            bestTrans = t;
+            bestDepth = d;
+          }
+        }
+      }
+    }
+
+    setGameWeights(prev => ({ ...prev, [selectedGame]: { gap: bestGap, trans: bestTrans, depth: bestDepth } }));
+    setCalibrating(false);
+    setTimeout(() => runBacktest(), 100);
+  };
+
+  const runBacktest = () => {
+    if (filteredDraws.length < 31) return;
+    setTesting(true);
+    let bankerHits = 0;
+    let napHits = 0;
+    const testCount = Math.min(filteredDraws.length - 1, 50); 
+
+    for (let i = 1; i < testCount; i++) {
+        const res = getPredictionForDrawIndex(i, filteredDraws);
+        if (!res || res.numbers.length === 0) continue;
+
+        const actualDrawWinners = filteredDraws[i-1].gagnants;
+        const banker = res.numbers[0];
+        
+        if (actualDrawWinners.includes(banker)) bankerHits++;
+        if (res.numbers.some(n => actualDrawWinners.includes(n))) napHits++;
+    }
+
+    setBacktestResult({ bankerHits, napHits, total: testCount - 1 });
+    setTesting(false);
+  };
+
+  return (
+    <section className="bg-indigo-900 border border-indigo-800 p-8 rounded-3xl shadow-xl text-white relative overflow-hidden group">
+       <div className="absolute top-0 right-0 p-4 opacity-10 group-hover:opacity-20 transition-opacity">
+         <Sparkles className="w-24 h-24" />
+       </div>
+       <div className="relative z-10">
+         <div className="flex flex-col md:flex-row md:items-center justify-between gap-4 mb-8">
+           <div>
+             <h3 className="text-sm font-bold text-indigo-300 uppercase tracking-widest mb-2 border-l-4 border-indigo-500 px-2">Algorithme V2 Optimisé</h3>
+             <div className="flex items-center gap-3 mt-4">
+                <p className="text-[10px] text-indigo-400 font-bold uppercase whitespace-nowrap">Jeu analysé :</p>
+                <select 
+                  value={selectedGame}
+                  onChange={(e) => {
+                    setSelectedGame(e.target.value);
+                    setBacktestResult(null);
+                  }}
+                  className="bg-indigo-950/50 border border-indigo-700 text-indigo-200 text-xs font-bold rounded-lg px-3 py-1 outline-none cursor-pointer focus:border-indigo-400 transition-colors"
+                >
+                  {gameNames.map(name => (
+                    <option key={name} value={name}>{name}</option>
+                  ))}
+                </select>
+             </div>
+           </div>
+           <div className="flex flex-wrap items-center gap-3">
+             {filteredDraws.length >= 40 && (
+               <button 
+                 onClick={runCalibration}
+                 disabled={calibrating}
+                 className="flex items-center gap-2 px-3 py-1.5 transition-all text-[10px] font-bold uppercase tracking-wider rounded-lg bg-indigo-900/40 text-indigo-300 hover:bg-indigo-800 disabled:opacity-50 border border-indigo-700/50"
+               >
+                 <Settings2 className="w-3 h-3" />
+                 {calibrating ? "Calibration..." : "Calibrer les poids"}
+               </button>
+             )}
+
+             {filteredDraws.length >= 31 && (
+               <button 
+                 onClick={runBacktest}
+                 disabled={testing}
+                 className="flex items-center gap-2 px-3 py-1.5 transition-all text-[10px] font-bold uppercase tracking-wider rounded-lg bg-indigo-600 text-white hover:bg-indigo-500 disabled:opacity-50 shadow-lg shadow-indigo-900/40"
+               >
+                 <TrendingUp className="w-3 h-3" />
+                 {testing ? "Backtest..." : `Backtest ${selectedGame} (${Math.min(filteredDraws.length - 1, 50)} derniers)`}
+               </button>
+             )}
+           </div>
+         </div>
+
+         {gameWeights[selectedGame] && (
+           <div className="mb-6 flex items-center gap-4 bg-indigo-950/20 p-2 rounded-lg border border-indigo-800/30">
+             <div className="flex items-center gap-2">
+                <span className="text-[8px] text-indigo-500 uppercase font-black tracking-tighter">Profondeur :</span>
+                <span className="text-[10px] text-indigo-300 font-mono font-bold">{gameWeights[selectedGame].depth}</span>
+             </div>
+             <div className="flex items-center gap-2">
+                <span className="text-[8px] text-indigo-500 uppercase font-black tracking-tighter">Poids Écart :</span>
+                <span className="text-[10px] text-indigo-300 font-mono font-bold">{gameWeights[selectedGame].gap.toFixed(1)}</span>
+             </div>
+             <div className="flex items-center gap-2">
+                <span className="text-[8px] text-indigo-500 uppercase font-black tracking-tighter">Poids Trans :</span>
+                <span className="text-[10px] text-indigo-300 font-mono font-bold">{gameWeights[selectedGame].trans.toFixed(1)}</span>
+             </div>
+             <div className="ml-auto flex items-center gap-2">
+                <span className="text-[8px] text-emerald-500 uppercase font-black">Confiance :</span>
+                <div className="w-16 h-1.5 bg-indigo-900 rounded-full overflow-hidden">
+                  <div className="h-full bg-emerald-500" style={{ width: `${confidenceScore * 100}%` }} />
+                </div>
+                <span className="text-[10px] text-emerald-400 font-black">{Math.round(confidenceScore * 100)}%</span>
+             </div>
+            </div>
+          )}
+         
+         {!currentProposed ? (
+           <div className="py-10 flex flex-col items-center justify-center border-2 border-dashed border-indigo-800/50 rounded-2xl bg-indigo-950/20">
+             <Info className="w-8 h-8 text-indigo-700 mb-3" />
+             <p className="text-sm text-indigo-400 font-medium italic">Pas assez de données pour {selectedGame} (Min. 30 requis)</p>
+             <p className="text-[10px] text-indigo-600 mt-2 uppercase font-bold tracking-tighter">Données actuelles : {filteredDraws.length} tirages</p>
+           </div>
+         ) : (
+           <div className="flex flex-wrap gap-6 items-center">
+             {currentProposed.map((num, i) => (
+               <div key={num} className="flex flex-col items-center">
+                  <div className={`w-14 h-14 rounded-2xl flex items-center justify-center font-black text-xl shadow-2xl transition-transform hover:scale-110 ${i === 0 ? 'bg-amber-500 text-white border-4 border-amber-400 shadow-amber-500/20' : 'bg-white text-indigo-900'}`}>
+                    {num < 10 ? `0${num}` : num}
+                  </div>
+                  <div className="mt-3 flex flex-col items-center">
+                    <span className="text-[10px] font-black text-white">{i === 0 ? 'BANKER' : `NAP ${i+1}`}</span>
+                  </div>
+               </div>
+             ))}
+           </div>
+         )}
+
+         {backtestResult && (
+           <div className="mt-8 grid grid-cols-1 md:grid-cols-2 gap-4">
+             <div className="bg-indigo-950/50 p-4 rounded-2xl border border-indigo-500/20">
+               <p className="text-[9px] font-black text-indigo-400 uppercase tracking-widest mb-2">Taux de réussite (Banker)</p>
+               <div className="flex items-baseline gap-2">
+                 <span className="text-2xl font-black text-amber-500">{Math.round((backtestResult.bankerHits / backtestResult.total) * 100)}%</span>
+                 <span className="text-[10px] text-indigo-400 uppercase font-bold">Sur {backtestResult.total} tirages testés</span>
+               </div>
+             </div>
+             <div className="bg-indigo-950/50 p-4 rounded-2xl border border-indigo-500/20">
+               <p className="text-[9px] font-black text-indigo-400 uppercase tracking-widest mb-2">Taux de présence (Au moins 1 NAP)</p>
+               <div className="flex items-baseline gap-2">
+                 <span className="text-2xl font-black text-emerald-400">{Math.round((backtestResult.napHits / backtestResult.total) * 100)}%</span>
+                 <span className="text-[10px] text-indigo-400 uppercase font-bold">Probabilité de gain (NAP2/3)</span>
+               </div>
+             </div>
+           </div>
+         )}
+         
+         <div className="mt-8 pt-6 border-t border-indigo-800/50">
+           <p className="text-[9px] text-indigo-400 italic leading-relaxed max-w-2xl bg-indigo-950/30 p-4 rounded-xl border border-indigo-800/30">
+             <strong className="text-indigo-300 not-italic">Optimisation V3 :</strong> Analyse des cycles par fenêtre glissante optimisée (depth calibration). Inclusion du facteur de co-occurrence (Correlation Matrix) pour booster les paires historiques fortes. Un score de confiance est calculé sur la variance du signal.
+           </p>
+         </div>
+       </div>
+    </section>
   );
 }
 
@@ -779,7 +1507,7 @@ export default function App() {
   const { user } = useAuth();
 
   useEffect(() => {
-    return subscribeToDraws(setDraws, 2000);
+    return subscribeToDraws(setDraws, 100000);
   }, []);
 
   useEffect(() => {

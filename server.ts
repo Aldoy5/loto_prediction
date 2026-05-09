@@ -21,6 +21,9 @@ async function startServer() {
       let monthYear = month;
       if (!monthYear) {
         monthYear = `${monthsChoices[now.getMonth()]} ${now.getFullYear()}`;
+      } else {
+        // Normalize: Ensure lowercase for LONACI API
+        monthYear = monthYear.toLowerCase();
       }
       
       // Determine year from monthYear string
@@ -72,15 +75,20 @@ async function startServer() {
                 const nameUpper = draw.drawName.toUpperCase();
                 const hourMatch = nameUpper.match(/(\d{1,2})\s*H/);
 
-                if (nameUpper.includes("SPECIAL WEEKEND")) {
-                  hourPriority = 7; // Before Digital Reveil (08H)
-                } else if (hourMatch) {
+                if (hourMatch) {
                   hourPriority = parseInt(hourMatch[1]);
-                } else if (nameUpper.includes("NIGHT")) {
-                  hourPriority = 22; // Late night
+                } else if (nameUpper.includes("SPECIAL WEEKEND")) {
+                  hourPriority = 3; // Default for special weekend
                 } else if (nameUpper.includes("REVEIL")) {
                   hourPriority = 8;
+                } else if (nameUpper.includes("NIGHT")) {
+                  hourPriority = 22;
                 }
+
+                // Invert hour for DESC sort so smaller hours (earlier) come first in the list
+                // 100 - 7 = 93 (Earlier)
+                // 100 - 22 = 78 (Later)
+                const invertedHour = 100 - hourPriority;
 
                 draws.push({
                   date_tirage: fullDate,
@@ -88,7 +96,7 @@ async function startServer() {
                   gagnants: gagnants,
                   machine: machine,
                   timestamp: new Date().toISOString(),
-                  sort_key: sortTimestamp * 100 + hourPriority
+                  sort_key: sortTimestamp * 100 + invertedHour
                 });
               }
             }
