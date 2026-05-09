@@ -1,0 +1,45 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    // Default deny
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Allow test connection
+    match /test/connection {
+      allow read: if true;
+    }
+
+    // Reuseable helpers
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isEmailVerified() {
+      return request.auth.token.email_verified == true;
+    }
+
+    function isValidDraw(data) {
+      return data.date_tirage is string && data.date_tirage.size() <= 30
+          && data.nom_tirage is string && data.nom_tirage.size() <= 100
+          && data.gagnants is list && data.gagnants.size() == 5
+          && data.machine is list && data.machine.size() <= 5
+          && (data.sort_key == null || data.sort_key is int)
+          && (data.timestamp == null || data.timestamp is timestamp);
+    }
+
+    match /draws/{drawId} {
+      allow read: if true;
+      allow create, update: if isSignedIn() && isValidDraw(request.resource.data);
+      allow delete: if false;
+    }
+
+    match /predictions/{predictionId} {
+      allow read: if isSignedIn() && request.auth.uid == resource.data.userId;
+      allow create: if isSignedIn() && request.auth.uid == request.resource.data.userId;
+      allow update: if isSignedIn() && request.auth.uid == resource.data.userId;
+      allow delete: if isSignedIn() && request.auth.uid == resource.data.userId;
+    }
+  }
+}

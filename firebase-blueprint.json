@@ -1,0 +1,23 @@
+{
+  "entities": {
+    "Draw": {
+      "title": "Tirage",
+      "description": "Un tirage du Loto Bonheur",
+      "type": "object",
+      "properties": {
+        "date_tirage": { "type": "string", "description": "Date du tirage au format DD/MM/YYYY" },
+        "nom_tirage": { "type": "string", "description": "Nom du tirage (ex: Loto 10h)" },
+        "gagnants": { "type": "array", "items": { "type": "integer" }, "description": "Les 5 boules gagnantes" },
+        "machine": { "type": "array", "items": { "type": "integer" }, "description": "Les 5 boules machine" },
+        "timestamp": { "type": "string", "format": "date-time", "description": "Date de création dans la DB" }
+      },
+      "required": ["date_tirage", "nom_tirage", "gagnants", "machine", "timestamp"]
+    }
+  },
+  "firestore": {
+    "/draws/{drawId}": {
+      "schema": "Draw",
+      "description": "Collection des tirages Loto Bonheur"
+    }
+  }
+}

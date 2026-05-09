@@ -1,0 +1,10 @@
+{
+  "name": "Loto Bonheur Tracker",
+  "description": "Traqueur de résultats Loto Bonheur (LONACI) avec archivage automatique, statistiques et prévisions IA.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "Scraping de données en temps réel",
+    "Analyses statistiques",
+    "Gestion de base de données Firestore"
+  ]
+}

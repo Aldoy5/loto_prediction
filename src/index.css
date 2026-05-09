@@ -1,0 +1,20 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+@layer components {
+  .ball {
+    @apply inline-flex items-center justify-center w-8 h-8 rounded-full text-[11px] font-bold border-[1.5px] transition-all hover:scale-110;
+  }
+  .ball-g {
+    @apply bg-indigo-50 border-indigo-500 text-indigo-700;
+  }
+  .ball-m {
+    @apply bg-pink-50 border-pink-500 text-pink-700;
+  }
+}
+
