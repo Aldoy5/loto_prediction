@@ -19,7 +19,8 @@ import {
   AlertCircle,
   ClipboardList,
   CheckCircle2,
-  Database
+  Database,
+  Download
 } from "lucide-react";
 import axios from "axios";
 import { getPredictions } from "./services/geminiService";
@@ -270,6 +271,18 @@ function Dashboard({ draws }: { draws: Draw[] }) {
     setTimeout(() => setSyncStatus({ loading: false, message: '' }), 5000);
   };
 
+  const handleExport = () => {
+    const dataStr = JSON.stringify(draws, null, 2);
+    const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+    
+    const exportFileDefaultName = `lonaci_db_export_${new Date().toISOString().split('T')[0]}.json`;
+    
+    const linkElement = document.createElement('a');
+    linkElement.setAttribute('href', dataUri);
+    linkElement.setAttribute('download', exportFileDefaultName);
+    linkElement.click();
+  };
+
   if (draws.length === 0) return (
     <div className="flex flex-col items-center justify-center min-h-[300px] border-2 border-dashed border-slate-200 rounded-3xl bg-slate-50/50">
       <AlertCircle className="w-12 h-12 text-slate-300 mb-4" />
@@ -291,15 +304,25 @@ function Dashboard({ draws }: { draws: Draw[] }) {
           </div>
         </div>
         <div className="bg-slate-50 border border-slate-100 p-6 rounded-2xl shadow-sm relative overflow-hidden group">
-          <p className="text-slate-400 text-[10px] font-bold mb-1 uppercase tracking-widest">Expansion Données</p>
-          <button 
-            disabled={syncStatus.loading || !user}
-            onClick={handleDeepSync}
-            className="text-xs font-bold text-indigo-600 flex items-center gap-2 hover:underline disabled:opacity-30"
-          >
-            <Database className="w-4 h-4" />
-            {syncStatus.loading ? 'Synchronisation...' : 'Lancer Deep Sync (6 Mo)'}
-          </button>
+          <p className="text-slate-400 text-[10px] font-bold mb-1 uppercase tracking-widest">Base de Données</p>
+          <div className="flex flex-col gap-2">
+            <button 
+              disabled={syncStatus.loading || !user}
+              onClick={handleDeepSync}
+              className="text-xs font-bold text-indigo-600 flex items-center gap-2 hover:underline disabled:opacity-30"
+            >
+              <Database className="w-4 h-4" />
+              {syncStatus.loading ? 'Sync en cours...' : 'Deep Sync (3 ans)'}
+            </button>
+            <button 
+              onClick={handleExport}
+              disabled={draws.length === 0}
+              className="text-xs font-bold text-slate-600 flex items-center gap-2 hover:underline disabled:opacity-30"
+            >
+              <Download className="w-4 h-4" />
+              Exporter JSON
+            </button>
+          </div>
           {syncStatus.message && (
             <p className="text-[8px] font-bold text-indigo-400 mt-2 uppercase animate-pulse">{syncStatus.message}</p>
           )}
