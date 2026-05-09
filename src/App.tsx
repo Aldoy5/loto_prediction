@@ -241,8 +241,8 @@ function Dashboard({ draws }: { draws: Draw[] }) {
       const now = new Date();
       const monthsToFetch = [];
       
-      // We fetch last 6 months to build a decent DB
-      for (let i = 0; i < 6; i++) {
+      // Fetch last 36 months to build a comprehensive DB
+      for (let i = 0; i < 36; i++) {
         const d = new Date();
         d.setMonth(now.getMonth() - i);
         monthsToFetch.push(`${monthsChoices[d.getMonth()]} ${d.getFullYear()}`);
@@ -251,10 +251,15 @@ function Dashboard({ draws }: { draws: Draw[] }) {
       let total = 0;
       for (const m of monthsToFetch) {
         setSyncStatus({ loading: true, message: `Extraction: ${m}...` });
-        const res = await axios.get(`/api/scrape?month=${encodeURIComponent(m)}`);
-        if (res.data.success && res.data.count > 0) {
-          await saveDraws(res.data.data);
-          total += res.data.count;
+        try {
+          const res = await axios.get(`/api/scrape?month=${encodeURIComponent(m)}`);
+          if (res.data.success && res.data.count > 0) {
+            console.log(`[DeepSync] Month: ${m}, Count: ${res.data.count}`);
+            await saveDraws(res.data.data);
+            total += res.data.count;
+          }
+        } catch (err) {
+          console.error(`[DeepSync] Error for ${m}:`, err);
         }
       }
       setSyncStatus({ loading: false, message: `Deep Sync terminé: ${total} tirages ajoutés !` });
@@ -751,7 +756,7 @@ export default function App() {
   const { user } = useAuth();
 
   useEffect(() => {
-    return subscribeToDraws(setDraws);
+    return subscribeToDraws(setDraws, 2000);
   }, []);
 
   useEffect(() => {

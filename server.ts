@@ -60,17 +60,35 @@ async function startServer() {
           
           [...standard, ...night].forEach((draw: any) => {
             if (draw.drawName && draw.drawName !== "-" && draw.winningNumbers && draw.winningNumbers !== ". - . - . - . - .") {
-              const gagnants = draw.winningNumbers.split(" - ").map((n: string) => parseInt(n.trim())).filter((n: number) => !isNaN(n));
-              const machine = draw.machineNumbers.split(" - ").map((n: string) => parseInt(n.trim())).filter((n: number) => !isNaN(n));
+              const winningStr = String(draw.winningNumbers || "");
+              const machineStr = String(draw.machineNumbers || "");
+              
+              const gagnants = winningStr.split(" - ").map((n: string) => parseInt(n.trim())).filter((n: number) => !isNaN(n));
+              const machine = machineStr.split(" - ").map((n: string) => parseInt(n.trim())).filter((n: number) => !isNaN(n));
 
               if (gagnants.length === 5) {
+                // Determine hour/priority for sort_key
+                let hourPriority = 0;
+                const nameUpper = draw.drawName.toUpperCase();
+                const hourMatch = nameUpper.match(/(\d{1,2})\s*H/);
+
+                if (nameUpper.includes("SPECIAL WEEKEND")) {
+                  hourPriority = 7; // Before Digital Reveil (08H)
+                } else if (hourMatch) {
+                  hourPriority = parseInt(hourMatch[1]);
+                } else if (nameUpper.includes("NIGHT")) {
+                  hourPriority = 22; // Late night
+                } else if (nameUpper.includes("REVEIL")) {
+                  hourPriority = 8;
+                }
+
                 draws.push({
                   date_tirage: fullDate,
                   nom_tirage: draw.drawName,
                   gagnants: gagnants,
                   machine: machine,
                   timestamp: new Date().toISOString(),
-                  sort_key: sortTimestamp
+                  sort_key: sortTimestamp * 100 + hourPriority
                 });
               }
             }

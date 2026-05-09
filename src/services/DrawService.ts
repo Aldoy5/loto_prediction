@@ -8,7 +8,8 @@ import {
   doc, 
   serverTimestamp,
   getDocs,
-  Timestamp
+  Timestamp,
+  writeBatch
 } from "firebase/firestore";
 import { db } from "../firebase";
 import { Draw, OperationType } from "../types";
@@ -16,7 +17,7 @@ import { handleFirestoreError } from "../lib/firestoreErrorHandler";
 
 const COLLECTION_NAME = "draws";
 
-export const subscribeToDraws = (callback: (draws: Draw[]) => void, max: number = 100) => {
+export const subscribeToDraws = (callback: (draws: Draw[]) => void, max: number = 6000) => {
   const q = query(
     collection(db, COLLECTION_NAME), 
     orderBy("sort_key", "desc"),
@@ -36,20 +37,28 @@ export const subscribeToDraws = (callback: (draws: Draw[]) => void, max: number 
 };
 
 export const saveDraws = async (draws: Draw[]) => {
-  for (const draw of draws) {
-    const id = `${draw.date_tirage.replace(/\//g, '-')}_${draw.nom_tirage.replace(/\s+/g, '_')}`;
-    const docRef = doc(db, COLLECTION_NAME, id);
-    
-    try {
-      // Use setDoc to overwrite or create, effectively INSERT OR IGNORE if we check existence or just set it
-      // Based on rules, create is allowed if not exists
-      await setDoc(docRef, {
+  if (draws.length === 0) return;
+
+  // Process in chunks of 500 (Firestore batch limit)
+  for (let i = 0; i < draws.length; i += 500) {
+    const chunk = draws.slice(i, i + 500);
+    const batch = writeBatch(db);
+
+    for (const draw of chunk) {
+      const id = `${draw.date_tirage.replace(/\//g, '-')}_${draw.nom_tirage.replace(/\s+/g, '_')}`;
+      const docRef = doc(db, COLLECTION_NAME, id);
+      
+      batch.set(docRef, {
         ...draw,
         timestamp: serverTimestamp()
       }, { merge: true });
+    }
+
+    try {
+      await batch.commit();
+      console.log(`[DrawService] Batch de ${chunk.length} tirages sauvegardé.`);
     } catch (error) {
-      console.error("Error saving draw:", draw.nom_tirage, error);
-      // We don't necessarily want to halt the whole process if one fails (e.g. duplicate)
+      console.error("[DrawService] Erreur lors du commit du batch:", error);
     }
   }
 };
